@@ -3,10 +3,10 @@
 (function (root) {
   'use strict';
 
-  const CHAR = 4;          // un caractère de la carte = 4 × 4 cellules
+  const CHAR = 6;          // un caractère de la carte = 6 × 6 cellules
   const WALL_H = 3;        // un mur ajoute 3 niveaux au terrain
   const ROCK_H = 6;
-  const CASTLE_R = 3.2;    // rayon de l'emprise d'un château, en cellules
+  const CASTLE_R = 4.6;    // rayon de l'emprise d'un château, en cellules
   const BRUSH_R = 1.3;     // rayon du pinceau : un trait fait environ 3 cellules de large
 
   const HEIGHTS = { '~': -1.5, ',': -0.4, '.': 0.4, R: ROCK_H };

@@ -2,6 +2,7 @@
 // Test de fumée dans Chromium.
 //  1. Niveau 1 : on trace le mur montré par le tutoriel, on lance la marée → victoire.
 //  2. Niveau 2 sans mur → défaite, le chemin de l'eau s'affiche, « Réparer » garde les murs.
+//  3. Niveau très difficile : la solution calculée, tracée au doigt, tient dans le seau et gagne.
 // Usage : NODE_PATH=$(npm root -g) node tools/smoke.js [dossier-captures]
 'use strict';
 const path = require('path');
@@ -53,7 +54,8 @@ const url = 'file://' + path.resolve(__dirname, '..', 'index.html');
   await shot('d4-victoire.png');
   const title = await page.textContent('#result-title');
   if (!/sauvé|Parfait/.test(title)) throw new Error('pas d’écran de victoire : ' + title);
-  console.log(`niveau 1 gagné avec ${90 - left1} sable (${title.trim()})`);
+  const bucket1 = await page.evaluate(() => window.MareeHaute.level.bucket);
+  console.log(`niveau 1 gagné avec ${bucket1 - left1} sable (${title.trim()})`);
 
   // 2. Niveau 2 sans mur : défaite et chemin de l'eau.
   await page.click('#result-actions .primary');
@@ -68,6 +70,29 @@ const url = 'file://' + path.resolve(__dirname, '..', 'index.html');
   if (phase !== 'build') throw new Error('« Réparer » devrait revenir à la construction');
   await shot('d6-reparer.png');
 
+  // 3. Niveau très difficile : on trace la solution au doigt, trait par trait, et elle doit tenir dans le seau.
+  const { solutionStrokes } = require('./check.js');
+  const Sim = require('../src/sim.js');
+  const LEVELS = require('../src/levels.js');
+  const hardIdx = LEVELS.findIndex((d) => d.hard);
+  await page.evaluate((k) => window.MareeHaute.startLevel(k), hardIdx);
+  await page.waitForTimeout(300);
+  await shot('h1-difficile.png');
+  for (const s of solutionStrokes(Sim.buildLevel(LEVELS[hardIdx]))) await stroke(s.length > 1 ? s : [s[0], s[0]]);
+  const hardLeft = await page.evaluate(() => window.MareeHaute.left);
+  await shot('h2-solution.png');
+  const fps = await page.evaluate(() => new Promise((done) => {
+    let n = 0; const t0 = performance.now();
+    (function tick() { if (++n < 60) requestAnimationFrame(tick); else done(Math.round(60000 / (performance.now() - t0))); })();
+  }));
+  await page.click('#btn-tide');
+  await page.waitForTimeout(3000);
+  await shot('h3-maree.png');
+  await waitPhase('won', 20000);
+  await page.waitForTimeout(1300);
+  await shot('h4-victoire.png');
+  console.log(`niveau difficile gagné au doigt avec ${LEVELS[hardIdx].bucket - hardLeft} sable sur ${LEVELS[hardIdx].bucket} (≈ ${fps} images/s sans GPU)`);
+
   for (const i of [2, 3, 4, 5, 6, 7]) {
     await page.evaluate((k) => window.MareeHaute.startLevel(k), i);
     await page.waitForTimeout(250);
@@ -76,5 +101,5 @@ const url = 'file://' + path.resolve(__dirname, '..', 'index.html');
 
   await browser.close();
   if (errors.length) throw new Error('erreurs JS : ' + errors.join(' | '));
-  console.log('OK : victoire au niveau 1, défaite expliquée et réparation au niveau 2, aucune erreur JS');
+  console.log('OK : victoire au niveau 1, défaite expliquée et réparation au niveau 2, niveau très difficile résolu, aucune erreur JS');
 })().catch((e) => { console.error('ÉCHEC :', e.message); process.exit(1); });

@@ -8,7 +8,7 @@
 
   const K = 3;                 // pixels de rendu par cellule (avant mise à l'échelle)
   const RISE = 5;              // secondes de montée de la marée
-  const FLOW = 45;             // anneaux d'eau par seconde
+  const FLOW = 70;             // anneaux d'eau par seconde
   const HOLD_MIN = 1.2;        // secondes minimales à marée haute
   const STAR2 = 1.5;           // 2 étoiles jusqu'à 1,5 × l'objectif
 
@@ -404,7 +404,7 @@
     const pulse = reduceMotion ? 0.8 : 0.65 + 0.25 * Math.sin(time / 500);
     ctx.fillStyle = `rgba(255, 255, 255, ${pulse + 0.1})`;
     const r = Math.max(1.2, view.cs * 0.2);
-    for (let k = 0; k < contour.length; k += 2) {
+    for (let k = 0; k < contour.length; k += 3) {
       const p = toScreen(contour[k][0], contour[k][1]);
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
     }
@@ -432,7 +432,7 @@
 
   function drawCastle(c, k, time) {
     const p = toScreen(c.x, c.y);
-    const s = view.cs * 7.6;
+    const s = view.cs * 11;
     const t = reduceMotion ? 0 : time / 1000;
     const drowned = phase === 'lost' && k === lostCastle;
     const sink = drowned ? Math.min(1, (performance.now() - lostAt) / 900) : 0;
@@ -485,7 +485,7 @@
   // Défaite : on montre le chemin exact pris par l'eau, de la mer jusqu'au château.
   function drawPath(time) {
     const pts = [];
-    for (let k = 0; k < lostPath.length; k += 2) {
+    for (let k = 0; k < lostPath.length; k += 3) {
       const i = lostPath[k];
       pts.push(toScreen((i % lv.cols) + 0.5, Math.floor(i / lv.cols) + 0.5));
     }

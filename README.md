@@ -24,6 +24,7 @@ Ouvre `index.html` dans un navigateur (sur téléphone ou en vue mobile). Aucune
 | 6 | Le ruisseau | L'eau peut arriver par derrière : lire les pointillés |
 | 7 | Les jumeaux | Deux châteaux, un seul seau |
 | 8 | Grande marée | La mer monte très haut |
+| 9 | L’estuaire | **Très difficile** : trois châteaux, un faux passage, un ruisseau qui arrive par derrière, et un seau trop petit pour entourer chaque château |
 
 ## Fichiers
 
@@ -33,8 +34,8 @@ Ouvre `index.html` dans un navigateur (sur téléphone ou en vue mobile). Aucune
 | `src/sim.js` | Simulation pure : terrain, murs, montée de l'eau |
 | `src/levels.js` | Cartes des niveaux |
 | `src/app.js` | Rendu canvas, dessin au doigt, marée animée, écrans |
-| `tools/check.js` | Vérifie chaque niveau (faisable, pas trivial) et calcule la coupe minimale pour régler le seau et les étoiles |
-| `tools/smoke.js` | Test dans Chromium : victoire au niveau 1, défaite expliquée puis réparation au niveau 2 |
+| `tools/check.js` | Vérifie chaque niveau (faisable, pas trivial), calcule le coût du meilleur tracé (coupe minimale) et celui de la solution naïve (entourer les châteaux) |
+| `tools/smoke.js` | Test dans Chromium : victoire au niveau 1, défaite expliquée puis réparation au niveau 2, niveau très difficile résolu au doigt |
 | `prototypes/v1-hexagones/` | Premier prototype (tour par tour sur hexagones), conservé pour mémoire |
 
 ```sh
@@ -44,7 +45,7 @@ NODE_PATH=$(npm root -g) node tools/smoke.js
 
 ## Écrire un niveau
 
-Une carte fait 15 × 22 caractères, et chaque caractère couvre 4 × 4 cellules.
+Une carte fait 15 × 22 caractères, et chaque caractère couvre 6 × 6 cellules (grille de 90 × 132).
 
 - `~` : mer profonde
 - `,` : mer peu profonde
@@ -52,4 +53,4 @@ Une carte fait 15 × 22 caractères, et chaque caractère couvre 4 × 4 cellules
 - `1`…`9` : hauteur du sable
 - `R` : rocher
 
-`tideMax` fixe la hauteur atteinte par la mer, `bucket` le sable disponible et `par` l'objectif pour 3 étoiles. `node tools/check.js` signale un niveau impossible, un niveau trop facile ou un réglage incohérent.
+`tideMax` fixe la hauteur atteinte par la mer, `bucket` le sable disponible et `par` l'objectif pour 3 étoiles. Avec `hard: true`, le seau doit être serré et la solution naïve impossible. `node tools/check.js` signale un niveau impossible, un niveau trop facile ou un réglage incohérent.

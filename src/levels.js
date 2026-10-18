@@ -1,10 +1,11 @@
-// Niveaux. Une carte fait 15 caractères de large et 22 de haut ; chaque caractère couvre 4 × 4 cellules.
+// Niveaux. Une carte fait 15 caractères de large et 22 de haut ; chaque caractère couvre 6 × 6 cellules.
 //   ~  mer profonde    ,  mer peu profonde    .  sable mouillé
 //   1…9  hauteur du sable    R  rocher
 // castles : centres des châteaux, en coordonnées de carte (7.5 = milieu de la 8e colonne).
 // tideMax : hauteur atteinte par la mer. La ligne pointillée du jeu suit cette hauteur.
 // bucket : sable disponible (en cellules de mur). par : sable utilisé maximum pour 3 étoiles.
-// `node tools/check.js` vérifie chaque niveau et calcule la coupe minimale qui sert à régler bucket et par.
+// `node tools/check.js` vérifie chaque niveau et calcule le coût du meilleur tracé qui sert à régler bucket et par.
+// hard : niveau très difficile ; le seau est serré et entourer chaque château ne suffit pas.
 (function (root) {
   'use strict';
   const SEA = [
@@ -19,7 +20,7 @@
       id: 'crique',
       name: 'La crique',
       hint: 'Trace un mur de sable en travers du passage. La mer montera jusqu’aux pointillés.',
-      tideMax: 2.5, bucket: 90, par: 50,
+      tideMax: 2.5, bucket: 125, par: 70,
       castles: [[7.5, 6]],
       guide: [[5.4, 10.5], [9.6, 10.5]],
       map: [
@@ -47,7 +48,7 @@
       id: 'chenaux',
       name: 'Deux chenaux',
       hint: 'L’eau prend le moindre passage. Bouche-les tous.',
-      tideMax: 2.5, bucket: 100, par: 34,
+      tideMax: 2.5, bucket: 90, par: 50,
       castles: [[7.5, 5.5]],
       map: [
         '444444444444444',
@@ -74,7 +75,7 @@
       id: 'ouverte',
       name: 'Plage ouverte',
       hint: 'Pas de passage cette fois. Appuie ton mur sur la dune derrière le château.',
-      tideMax: 2.5, bucket: 150, par: 84,
+      tideMax: 2.5, bucket: 170, par: 95,
       castles: [[7.5, 7.5]],
       map: [
         '444444444444444',
@@ -101,7 +102,7 @@
       id: 'baie',
       name: 'Près ou loin',
       hint: 'Fermer toute la baie ou entourer le château ? Le sable est compté.',
-      tideMax: 2.5, bucket: 150, par: 84,
+      tideMax: 2.5, bucket: 200, par: 95,
       castles: [[7.5, 5.4]],
       map: [
         '444444444444444',
@@ -132,7 +133,7 @@
       id: 'rochers',
       name: 'Les rochers',
       hint: 'Les rochers arrêtent l’eau. Relie-les entre eux.',
-      tideMax: 2.5, bucket: 130, par: 50,
+      tideMax: 2.5, bucket: 135, par: 75,
       castles: [[7.5, 8]],
       map: [
         '444444444444444',
@@ -159,7 +160,7 @@
       id: 'ruisseau',
       name: 'Le ruisseau',
       hint: 'Suis bien les pointillés : l’eau peut arriver par derrière.',
-      tideMax: 2.5, bucket: 100, par: 50,
+      tideMax: 2.5, bucket: 130, par: 72,
       castles: [[6.5, 6.5]],
       map: [
         '444444444444444',
@@ -186,7 +187,7 @@
       id: 'jumeaux',
       name: 'Les jumeaux',
       hint: 'Deux châteaux à sauver. Un seul seau de sable.',
-      tideMax: 2.5, bucket: 130, par: 67,
+      tideMax: 2.5, bucket: 170, par: 95,
       castles: [[3, 5.5], [12, 5.5]],
       map: [
         '444444444444444',
@@ -213,7 +214,7 @@
       id: 'grande',
       name: 'Grande marée',
       hint: 'La mer monte très haut. Sers-toi des dunes et des rochers pour économiser.',
-      tideMax: 3.5, bucket: 170, par: 84,
+      tideMax: 3.5, bucket: 170, par: 95,
       castles: [[7.5, 9.5]],
       map: [
         '555555555555555',
@@ -232,6 +233,33 @@
         '22222RR22222222',
         '222222222222222',
         '111111111111111',
+        '111111111111111',
+        ...SEA,
+      ],
+    },
+    {
+      id: 'estuaire',
+      name: 'L’estuaire',
+      hint: 'Très difficile. Entourer chaque château coûte trop cher : trouve les vrais passages de l’eau.',
+      tideMax: 2.5, bucket: 142, par: 132, hard: true,
+      castles: [[3, 3], [9.5, 3.5], [7.5, 14.9]],
+      map: [
+        '444444444444444',
+        '411111111111111',
+        '411111111111441',
+        '411111111111441',
+        '411111111111441',
+        '411111111111441',
+        '444144414441441',
+        '444144414441441',
+        '444144414441441',
+        '441114111441441',
+        '441114111441441',
+        '441114111441441',
+        '441114444411441',
+        '441114444411441',
+        '411111111111111',
+        '1111R11111R1111',
         '111111111111111',
         ...SEA,
       ],
