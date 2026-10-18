@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Test de fumée dans Chromium : joue le niveau 1 au doigt (glisser) et vérifie la victoire,
-// puis vérifie qu'une mauvaise première action perd le niveau 2.
+// Test de fumée dans Chromium.
+//  1. Niveau 1 : on trace le mur montré par le tutoriel, on lance la marée → victoire.
+//  2. Niveau 2 sans mur → défaite, le chemin de l'eau s'affiche, « Réparer » garde les murs.
 // Usage : NODE_PATH=$(npm root -g) node tools/smoke.js [dossier-captures]
 'use strict';
 const path = require('path');
@@ -11,72 +12,69 @@ const url = 'file://' + path.resolve(__dirname, '..', 'index.html');
 
 (async () => {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 390, height: 780 }, deviceScaleFactor: 2, hasTouch: true });
+  const page = await browser.newPage({ viewport: { width: 390, height: 800 }, deviceScaleFactor: 2 });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.goto(url);
-  await page.waitForTimeout(400);
-  if (shots) await page.screenshot({ path: path.join(shots, '1-depart.png') });
+  await page.waitForTimeout(600);
+  const shot = async (name) => { if (shots) await page.screenshot({ path: path.join(shots, name) }); };
+  await shot('d1-depart.png');
 
-  const canvasBox = await page.locator('#canvas').boundingBox();
-  async function dragCell(from, to) {
-    const a = await page.evaluate((i) => window.MareeHaute.cellPoint(i), from);
-    const b = await page.evaluate((i) => window.MareeHaute.cellPoint(i), to);
-    await page.mouse.move(canvasBox.x + a.x, canvasBox.y + a.y);
+  async function stroke(points) {
+    const pts = [];
+    for (const [x, y] of points) pts.push(await page.evaluate(([cx, cy]) => window.MareeHaute.cellToClient(cx, cy), [x, y]));
+    await page.mouse.move(pts[0].x, pts[0].y);
     await page.mouse.down();
-    await page.mouse.move(canvasBox.x + (a.x + b.x) / 2, canvasBox.y + (a.y + b.y) / 2 - 20, { steps: 4 });
-    if (shots && from === -99) await page.screenshot({ path: path.join(shots, 'drag.png') });
-    await page.mouse.move(canvasBox.x + b.x, canvasBox.y + b.y, { steps: 4 });
+    for (let k = 1; k < pts.length; k++) await page.mouse.move(pts[k].x, pts[k].y, { steps: 12 });
     await page.mouse.up();
-    await page.waitForTimeout(150);
   }
-  async function wait(n) {
-    for (let k = 0; k < n; k++) { await page.click('#btn-wait'); await page.waitForTimeout(60); }
+  async function waitPhase(want, ms = 15000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      const p = await page.evaluate(() => window.MareeHaute.phase);
+      if (p === want) return;
+      await page.waitForTimeout(100);
+    }
+    throw new Error(`phase « ${want} » jamais atteinte (actuelle : ${await page.evaluate(() => window.MareeHaute.phase)})`);
   }
-  const cells = await page.evaluate(() => window.MareeHaute.level.cells.map((c) => ({ q: c.q, r: c.r, flag: c.flag })));
-  const flag = cells.findIndex((c) => c.flag);
-  const others = cells.map((_, i) => i).filter((i) => i !== flag);
 
-  // Niveau 1 : deux pelletées sur le drapeau, puis on laisse monter la mer.
-  await dragCell(others[0], flag);
-  await dragCell(others[1], flag);
-  if (shots) await page.screenshot({ path: path.join(shots, '2-apres-deux-coups.png') });
-  let h = await page.evaluate((f) => window.MareeHaute.state.h[f], flag);
-  if (h !== 3) throw new Error(`drapeau à ${h}, attendu 3`);
-  await wait(1);
-  await page.waitForTimeout(1200);
-  if (shots) await page.screenshot({ path: path.join(shots, '3-maree-1.png') });
-  await wait(3);
+  // 1. Niveau 1 : le mur du tutoriel, un peu plus long de chaque côté.
+  const guide = await page.evaluate(() => window.MareeHaute.level.guide);
+  const [[ax, ay], [bx, by]] = guide;
+  await stroke([[ax - 2, ay], [bx + 2, by]]);
+  const left1 = await page.evaluate(() => window.MareeHaute.left);
+  await shot('d2-mur.png');
+  await page.click('#btn-tide');
+  await page.waitForTimeout(2500);
+  await shot('d3-maree.png');
+  await waitPhase('won');
   await page.waitForTimeout(1500);
-  const won = await page.isVisible('#end') && (await page.textContent('#end-title'));
-  if (shots) await page.screenshot({ path: path.join(shots, '4-victoire.png') });
-  if (!won || !/Parfait|sauvé/.test(won)) throw new Error('pas de victoire au niveau 1 : ' + won);
+  await shot('d4-victoire.png');
+  const title = await page.textContent('#result-title');
+  if (!/sauvé|Parfait/.test(title)) throw new Error('pas d’écran de victoire : ' + title);
+  console.log(`niveau 1 gagné avec ${90 - left1} sable (${title.trim()})`);
 
-  // Niveau 2 : creuser la case voisine du drapeau en premier coupe le chemin.
-  await page.click('#end-actions .primary');
-  await page.waitForTimeout(300);
-  const l2 = await page.evaluate(() => window.MareeHaute.level.cells.map((c) => ({ q: c.q, flag: c.flag })));
-  const f2 = l2.findIndex((c) => c.flag);
-  const near = l2.findIndex((c) => !c.flag && Math.abs(c.q - l2[f2].q) === 1);
-  await dragCell(near, f2);
-  if (shots) await page.screenshot({ path: path.join(shots, '5-sentier-coupe.png') });
-  const reachable = await page.evaluate(() => {
-    const { level, state } = window.MareeHaute;
-    return window.Rules.legalMoves(level, state).some(([, j]) => level.cells[j].flag);
-  });
-  if (reachable) throw new Error('le sentier devrait être coupé');
+  // 2. Niveau 2 sans mur : défaite et chemin de l'eau.
+  await page.click('#result-actions .primary');
+  await page.waitForTimeout(400);
+  await page.click('#btn-tide');
+  await waitPhase('lost');
+  await page.waitForTimeout(1800);
+  await shot('d5-defaite.png');
+  await page.click('#result-actions .primary'); // Réparer
+  await page.waitForTimeout(600);
+  const phase = await page.evaluate(() => window.MareeHaute.phase);
+  if (phase !== 'build') throw new Error('« Réparer » devrait revenir à la construction');
+  await shot('d6-reparer.png');
 
-  await page.evaluate(() => window.MareeHaute.startLevel(6));
-  await page.waitForTimeout(400);
-  if (shots) await page.screenshot({ path: path.join(shots, '6-cuvette.png') });
-  await page.evaluate(() => window.MareeHaute.startLevel(9));
-  await page.waitForTimeout(400);
-  if (shots) await page.screenshot({ path: path.join(shots, '7-port.png') });
-  await page.click('#btn-menu');
-  await page.waitForTimeout(200);
-  if (shots) await page.screenshot({ path: path.join(shots, '8-menu.png') });
+  for (const i of [2, 3, 4, 5, 6, 7]) {
+    await page.evaluate((k) => window.MareeHaute.startLevel(k), i);
+    await page.waitForTimeout(250);
+    await shot(`n${i + 1}.png`);
+  }
 
   await browser.close();
   if (errors.length) throw new Error('erreurs JS : ' + errors.join(' | '));
-  console.log('OK : niveau 1 gagné au glisser, sentier coupé au niveau 2, aucune erreur JS');
+  console.log('OK : victoire au niveau 1, défaite expliquée et réparation au niveau 2, aucune erreur JS');
 })().catch((e) => { console.error('ÉCHEC :', e.message); process.exit(1); });

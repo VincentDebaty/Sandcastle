@@ -1,158 +1,223 @@
-// Interface : rendu de l'île sur canvas, gestes, marée, écrans de fin et choix des niveaux.
+// Interface : dessin des murs, rendu de la plage, marée animée, écrans de fin.
 (function () {
   'use strict';
-  const R = window.Rules;
+  const Sim = window.Sim;
   const LEVELS = window.LEVELS;
   const $ = (id) => document.getElementById(id);
-
-  const TILT = 0.8;         // écrasement vertical de la vue
-  const LIFT = 0.3;         // hauteur d'un niveau de sable, en taille d'hexagone
-  const ROCK_VISUAL = 3.4;  // hauteur affichée d'un rocher
-  const SQRT3 = Math.sqrt(3);
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  const COLORS = {
-    seaDeep: '#0b5466', sea: '#13798c', shallow: '#2fa3a8', foam: '#eef8f4',
-    sandTop: '#f0d7a1', sandTopHigh: '#f6e3b8', sandDamp: '#cfae73', sandSide: '#c99d5e', sandSideDark: '#a87c45',
-    pit: '#b3905a', rockTop: '#8d9a98', rockSide: '#66726f', rockSideDark: '#525c5a',
-    ink: '#10323a', flag: '#e2463a', pole: '#5b4630', select: '#ffffff', target: '#fff4cf',
-  };
+  const K = 3;                 // pixels de rendu par cellule (avant mise à l'échelle)
+  const RISE = 5;              // secondes de montée de la marée
+  const FLOW = 45;             // anneaux d'eau par seconde
+  const HOLD_MIN = 1.2;        // secondes minimales à marée haute
+  const STAR2 = 1.5;           // 2 étoiles jusqu'à 1,5 × l'objectif
 
   // ---------- état ----------
   let levelIdx = 0;
-  let level = null;
-  let history = [];          // pile des états, le dernier est l'état courant
-  let usedUndo = false;
-  let selected = -1;
-  let targets = [];
-  let drag = null;           // { x, y } position du doigt pendant un glisser
-  let pointerStart = null;
-  let shownTide = 0;         // marée affichée (animée)
-  let grains = [];           // grains de sable en vol
-  let endShown = false;
+  let lv = null;
+  let wall, wallVis, wetVis, water;
+  let strokes = [];            // chaque trait = liste des cellules construites
+  let current = null;          // trait en cours
+  let lastPoint = null;
+  let left = 0;                // sable restant
+  let phase = 'build';         // build | tide | won | lost
+  let tideTime = 0, seaLevel = 0, flowAcc = 0, quietTime = 0;
+  let lostPath = null, lostCastle = -1, lostAt = 0;
+  let wonAt = 0;
+  let particles = [];
+  let contour = [];
   let progress = loadProgress();
-
-  const state = () => history[history.length - 1];
+  let finger = null;
 
   function loadProgress() {
-    try { return JSON.parse(localStorage.getItem('maree-haute.progress') || '{}') || {}; }
+    try { return JSON.parse(localStorage.getItem('maree-haute.digue') || '{}') || {}; }
     catch (e) { return {}; }
   }
   function saveProgress() {
-    try { localStorage.setItem('maree-haute.progress', JSON.stringify(progress)); } catch (e) { /* stockage indisponible */ }
+    try { localStorage.setItem('maree-haute.digue', JSON.stringify(progress)); } catch (e) { /* stockage indisponible */ }
   }
 
-  function startLevel(idx, snapshot) {
+  function startLevel(idx, savedStrokes) {
     levelIdx = idx;
-    level = R.parseLevel(LEVELS[idx]);
-    history = snapshot && snapshot.history ? snapshot.history : [R.initialState(level)];
-    usedUndo = snapshot ? !!snapshot.usedUndo : false;
-    selected = -1; targets = []; drag = null; grains = [];
-    shownTide = state().tide;
-    endShown = false;
-    $('end').hidden = true;
+    lv = Sim.buildLevel(LEVELS[idx]);
+    const n = lv.cols * lv.rows;
+    wall = new Uint8Array(n);
+    wallVis = new Float32Array(n);
+    water = Sim.createWater(lv);
+    wetVis = new Float32Array(n);
+    for (let i = 0; i < n; i++) wetVis[i] = water.wet[i];
+    strokes = []; current = null; left = lv.bucket;
+    if (savedStrokes) {
+      for (const s of savedStrokes) {
+        const kept = s.filter((i) => Sim.canBuild(lv, wall, water, i)).slice(0, left);
+        kept.forEach((i) => { wall[i] = 1; wallVis[i] = 1; });
+        left -= kept.length;
+        if (kept.length) strokes.push(kept);
+      }
+    }
+    phase = 'build'; tideTime = 0; seaLevel = 0; lostPath = null; lostCastle = -1;
+    particles = [];
+    contour = buildContour();
+    $('result').hidden = true;
     $('level-num').textContent = `Niveau ${idx + 1} sur ${LEVELS.length}`;
-    $('level-name').textContent = level.name;
-    $('hint').textContent = level.hint;
+    $('level-name').textContent = lv.name;
+    setHint(lv.hint);
     layout();
     refreshHud();
   }
 
-  // ---------- actions ----------
-  function act(move) {
-    if (R.status(level, state()).over) return;
-    const before = state();
-    const next = R.play(level, before, move);
-    history.push(next);
-    if (move) launchGrain(move[0], move[1]);
-    try { if (navigator.vibrate) navigator.vibrate(move ? 12 : 6); } catch (e) { /* refusé */ }
-    selected = -1; targets = [];
-    refreshHud();
-    const st = R.status(level, next);
-    if (st.over) setTimeout(() => showEnd(st), next.tide !== before.tide ? 900 : 400);
-  }
-
-  function undo() {
-    if (history.length <= 1) return;
-    history.pop();
-    usedUndo = true;
-    selected = -1; targets = [];
-    endShown = false;
-    $('end').hidden = true;
-    shownTide = Math.min(shownTide, state().tide + 0.0001);
-    refreshHud();
-  }
-
-  function restart() { startLevel(levelIdx); }
-
-  // ---------- affichage du haut ----------
-  function refreshHud() {
-    const s = state();
-    const gauge = $('gauge');
-    gauge.querySelectorAll('.step').forEach((n) => n.remove());
-    for (let t = 0; t <= level.tideMax; t++) {
-      const el = document.createElement('span');
-      el.className = 'step' + (t <= s.tide ? ' on' : '') + (t === level.tideMax ? ' max' : '');
-      el.textContent = t === level.tideMax ? `${t} haute` : String(t);
-      gauge.appendChild(el);
-    }
-    const dots = $('dots');
-    dots.innerHTML = '';
-    const over = R.status(level, s).over;
-    const left = level.tideEvery - s.actions;
-    if (over) {
-      $('next-text').textContent = 'Marée haute';
-    } else {
-      $('next-text').textContent = left === 1 ? 'La mer monte au prochain coup' : `La mer monte dans ${left} coups`;
-      for (let i = 0; i < level.tideEvery; i++) {
-        const d = document.createElement('span');
-        d.className = 'dot' + (i < s.actions ? ' used' : '');
-        dots.appendChild(d);
+  // Ligne de marée haute : bords entre cellules sous et au-dessus de tideMax (terrain seul).
+  function buildContour() {
+    const pts = [];
+    const low = (i) => !lv.rock[i] && lv.terrain[i] < lv.tideMax;
+    for (let y = 0; y < lv.rows; y++) {
+      for (let x = 0; x < lv.cols; x++) {
+        const i = y * lv.cols + x;
+        if (x < lv.cols - 1 && low(i) !== low(i + 1)) pts.push([x + 1, y + 0.5]);
+        if (y < lv.rows - 1 && low(i) !== low(i + lv.cols)) pts.push([x + 0.5, y + 1]);
       }
     }
-    $('btn-undo').disabled = history.length <= 1;
-    $('btn-wait').disabled = over;
+    return pts;
   }
 
-  // ---------- écran de fin ----------
-  function showEnd(st) {
-    if (endShown || !R.status(level, state()).over) return;
-    endShown = true;
-    const checks = $('end-checks');
-    const actions = $('end-actions');
-    checks.innerHTML = ''; actions.innerHTML = '';
-    if (st.won) {
-      const items = [
-        [true, level.cells.filter((c) => c.flag).length > 1 ? 'Drapeaux sauvés' : 'Drapeau sauvé'],
-        [!usedUndo, 'Sans annuler'],
-        [st.dry >= level.best, `${st.dry} case${st.dry > 1 ? 's' : ''} au sec sur ${level.best} possible${level.best > 1 ? 's' : ''}`],
-      ];
-      const stars = items.filter((i) => i[0]).length;
-      const prev = progress[level.id] || 0;
-      if (stars > prev) { progress[level.id] = stars; saveProgress(); }
-      $('end-title').textContent = stars === 3 ? 'Parfait !' : (level.cells.filter((c) => c.flag).length > 1 ? 'Drapeaux sauvés !' : 'Drapeau sauvé !');
-      $('end-stars').innerHTML = [0, 1, 2].map((i) => `<span class="${i < stars ? '' : 'off'}">★</span>`).join('');
-      $('end-stars').hidden = false;
-      items.forEach(([ok, label]) => {
-        const li = document.createElement('li');
-        li.className = ok ? 'ok' : 'ko';
-        li.innerHTML = `<span class="mark">${ok ? '✓' : '·'}</span><span></span>`;
-        li.lastChild.textContent = label;
-        checks.appendChild(li);
+  // ---------- haut de l'écran ----------
+  function refreshHud() {
+    const used = lv.bucket - left;
+    $('bucket-label').textContent = `Sable ${left}`;
+    $('bar-fill').style.width = `${(left / lv.bucket) * 100}%`;
+    const bar = $('bar');
+    bar.querySelectorAll('.mark').forEach((m) => m.remove());
+    if (lv.par) {
+      [[lv.par, '★★★'], [Math.round(lv.par * STAR2), '★★']].forEach(([p, label]) => {
+        const keep = lv.bucket - p;
+        if (keep <= 0) return;
+        const m = document.createElement('div');
+        m.className = 'mark';
+        m.style.left = `${(keep / lv.bucket) * 100}%`;
+        m.innerHTML = `<span>${label}</span>`;
+        bar.appendChild(m);
       });
-      $('end-text').textContent = '';
-      addButton(actions, 'Rejouer', 'ghost', restart);
+    }
+    $('btn-undo').disabled = phase !== 'build' || strokes.length === 0;
+    $('btn-clear').disabled = phase !== 'build' || used === 0;
+    $('btn-tide').disabled = phase !== 'build';
+  }
+
+  let hintTimer = null;
+  function setHint(text, temporary) {
+    $('hint').textContent = text;
+    clearTimeout(hintTimer);
+    if (temporary) hintTimer = setTimeout(() => { if (phase === 'build') $('hint').textContent = lv.hint; }, 2600);
+  }
+
+  // ---------- actions ----------
+  function undoStroke() {
+    if (phase !== 'build' || !strokes.length) return;
+    const s = strokes.pop();
+    s.forEach((i) => { wall[i] = 0; });
+    left += s.length;
+    refreshHud();
+  }
+
+  function clearAll() {
+    if (phase !== 'build') return;
+    while (strokes.length) undoStroke();
+    lostPath = null;
+  }
+
+  function launchTide() {
+    if (phase !== 'build') return;
+    phase = 'tide';
+    tideTime = 0; seaLevel = 0; flowAcc = 0; quietTime = 0;
+    water = Sim.createWater(lv);
+    lostPath = null;
+    setHint('La mer monte…');
+    buzz(20);
+    refreshHud();
+  }
+
+  function repair() {
+    // on garde les murs, la mer redescend, on peut boucher la brèche
+    phase = 'build';
+    water = Sim.createWater(lv);
+    seaLevel = 0;
+    $('result').hidden = true;
+    setHint('Le chemin de l’eau reste affiché. Bouche la brèche, puis relance la marée.');
+    refreshHud();
+  }
+
+  function buzz(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* refusé */ } }
+
+  // ---------- simulation de la marée ----------
+  function updateTide(dt) {
+    if (phase === 'tide') {
+      tideTime += dt;
+      const k = Math.min(1, tideTime / RISE);
+      seaLevel = lv.tideMax * (k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2);
+      flowAcc += dt * FLOW;
+      while (flowAcc >= 1) {
+        flowAcc -= 1;
+        const gained = Sim.stepWater(lv, wall, water, seaLevel);
+        quietTime = gained ? 0 : quietTime + 1 / FLOW;
+        const hit = Sim.floodedCastle(lv, water);
+        if (hit) { lose(hit); return; }
+      }
+      if (tideTime >= RISE + HOLD_MIN && quietTime > 0.5) win();
+    } else if (phase === 'won' || phase === 'lost') {
+      // la mer redescend doucement après une victoire ; elle reste haute après une défaite
+      if (phase === 'won') {
+        seaLevel = Math.max(0, seaLevel - dt * 1.2);
+        flowAcc += dt * FLOW;
+        while (flowAcc >= 1) { flowAcc -= 1; Sim.stepWater(lv, wall, water, seaLevel); }
+      }
+    }
+  }
+
+  function lose(hit) {
+    phase = 'lost';
+    lostCastle = hit.castle;
+    lostPath = Sim.pathTo(lv, water, hit.cell);
+    lostAt = performance.now();
+    buzz([40, 60, 40]);
+    setHint('La mer est passée par là.');
+    refreshHud();
+    setTimeout(() => showResult(false), reduceMotion ? 300 : 1300);
+  }
+
+  function win() {
+    phase = 'won';
+    wonAt = performance.now();
+    buzz(30);
+    const used = lv.bucket - left;
+    const stars = used <= lv.par ? 3 : used <= lv.par * STAR2 ? 2 : 1;
+    if (stars > (progress[lv.id] || 0)) { progress[lv.id] = stars; saveProgress(); }
+    setHint(lv.castles.length > 1 ? 'Les châteaux ont tenu !' : 'Le château a tenu !');
+    refreshHud();
+    setTimeout(() => showResult(true, stars, used), reduceMotion ? 300 : 1100);
+  }
+
+  function showResult(won, stars, used) {
+    const actions = $('result-actions');
+    actions.innerHTML = '';
+    if (won) {
+      $('result-title').textContent = stars === 3 ? 'Parfait !' : (lv.castles.length > 1 ? 'Châteaux sauvés !' : 'Château sauvé !');
+      $('result-stars').hidden = false;
+      $('result-stars').innerHTML = [0, 1, 2].map((i) => `<span class="${i < stars ? '' : 'off'}">★</span>`).join('');
+      $('result-text').textContent = stars === 3
+        ? `${used} sable utilisé. Digue construite au plus juste.`
+        : `${used} sable utilisé. Pour 3 étoiles, fais aussi bien avec ${lv.par} au plus.`;
+      addButton(actions, 'Rejouer', 'ghost', () => startLevel(levelIdx));
       if (levelIdx < LEVELS.length - 1) addButton(actions, 'Niveau suivant', 'primary', () => startLevel(levelIdx + 1));
       else addButton(actions, 'Tous les niveaux', 'primary', openMenu);
     } else {
-      $('end-title').textContent = 'Le drapeau est sous l’eau';
-      $('end-stars').hidden = true;
-      $('end-text').textContent = 'La mer a trouvé un passage jusqu’au drapeau. Annule ton dernier coup ou recommence le niveau.';
-      addButton(actions, 'Annuler le coup', 'ghost', undo);
-      addButton(actions, 'Recommencer', 'primary', restart);
+      $('result-title').textContent = 'La mer est passée';
+      $('result-stars').hidden = true;
+      $('result-text').textContent = 'Les pointillés montrent le chemin de l’eau. Tes murs restent en place : bouche la brèche.';
+      addButton(actions, 'Tout effacer', 'ghost', () => { repair(); clearAll(); lostPath = null; setHint(lv.hint); });
+      addButton(actions, 'Réparer', 'primary', repair);
     }
-    $('end').hidden = false;
-    actions.querySelector('.primary').focus();
+    $('result').hidden = false;
+    actions.querySelector('.primary').focus({ preventScroll: true });
   }
 
   function addButton(parent, label, cls, fn) {
@@ -162,7 +227,6 @@
     parent.appendChild(b);
   }
 
-  // ---------- menu des niveaux ----------
   function openMenu() {
     const list = $('levels');
     list.innerHTML = '';
@@ -176,14 +240,16 @@
       b.addEventListener('click', () => { $('menu').hidden = true; startLevel(i); });
       list.appendChild(b);
     });
-    $('end').hidden = true;
     $('menu').hidden = false;
   }
 
   // ---------- géométrie ----------
   const canvas = $('canvas');
   const ctx = canvas.getContext('2d');
-  let view = { s: 40, ox: 0, oy: 0, w: 0, h: 0, dpr: 1 };
+  const off = document.createElement('canvas');
+  const offCtx = off.getContext('2d');
+  let img = null;
+  const view = { cs: 6, ox: 0, oy: 0, w: 0, h: 0, dpr: 1 };
 
   function layout() {
     const box = $('board').getBoundingClientRect();
@@ -191,377 +257,356 @@
     canvas.width = Math.round(box.width * dpr);
     canvas.height = Math.round(box.height * dpr);
     view.w = box.width; view.h = box.height; view.dpr = dpr;
-    if (!level) return;
-    const maxH = Math.max(level.tideMax + 2, ...level.cells.filter((c) => !c.rock).map((c) => c.h + 1));
-    const hasRock = level.cells.some((c) => c.rock);
-    const top = Math.max(maxH, hasRock ? ROCK_VISUAL : 0) * LIFT + 0.9; // + place pour le drapeau
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    level.cells.forEach((c) => {
-      const x = SQRT3 * (c.q + c.r / 2), y = 1.5 * c.r * TILT;
-      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-    });
-    const wUnits = (maxX - minX) + SQRT3 + 0.6;
-    const hUnits = (maxY - minY) + 2 * TILT + top + 0.4;
-    const s = Math.min(view.w / wUnits, view.h / hUnits, 70);
-    view.s = s;
-    view.ox = view.w / 2 - s * (minX + maxX) / 2;
-    view.oy = view.h / 2 - s * (minY + maxY) / 2 + s * (top - 0.4) / 2;
-  }
-
-  function center(c) {
-    return { x: view.ox + view.s * SQRT3 * (c.q + c.r / 2), y: view.oy + view.s * 1.5 * c.r * TILT };
-  }
-
-  // Sommets d'un hexagone « pointe en haut » vu en perspective, à la hauteur lift (en niveaux).
-  function hexPoints(cx, cy, lift, scale = 1) {
-    const s = view.s * scale;
-    const y0 = cy - lift * LIFT * view.s;
-    const pts = [];
-    for (let k = 0; k < 6; k++) {
-      const a = (Math.PI / 180) * (60 * k - 90);
-      pts.push([cx + s * Math.cos(a), y0 + s * Math.sin(a) * TILT]);
+    if (!lv) return;
+    view.cs = Math.min(box.width / lv.cols, box.height / lv.rows);
+    view.ox = (box.width - view.cs * lv.cols) / 2;
+    view.oy = (box.height - view.cs * lv.rows) / 2;
+    if (off.width !== lv.cols * K || off.height !== lv.rows * K) {
+      off.width = lv.cols * K; off.height = lv.rows * K;
+      img = offCtx.createImageData(off.width, off.height);
     }
-    return pts; // 0 haut, 1 haut-droit, 2 bas-droit, 3 bas, 4 bas-gauche, 5 haut-gauche
   }
 
-  function pathPoly(pts) {
-    ctx.beginPath();
-    pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
-    ctx.closePath();
+  const toCell = (p) => [(p.x - view.ox) / view.cs, (p.y - view.oy) / view.cs];
+  const toScreen = (cx, cy) => ({ x: view.ox + cx * view.cs, y: view.oy + cy * view.cs });
+
+  // ---------- rendu de la plage (pixel par pixel, en basse résolution puis agrandi) ----------
+  let G = null, SH = null;
+  function computeFields() {
+    const n = lv.cols * lv.rows;
+    if (!G || G.length !== n) { G = new Float32Array(n); SH = new Float32Array(n); }
+    for (let i = 0; i < n; i++) {
+      const target = wall[i] ? 1 : 0;
+      wallVis[i] += (target - wallVis[i]) * 0.35;
+      wetVis[i] += (water.wet[i] - wetVis[i]) * 0.3;
+      G[i] = lv.terrain[i] + wallVis[i] * Sim.WALL_H;
+    }
+    const { cols, rows } = lv;
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const i = y * cols + x;
+        const gx = G[y * cols + Math.min(cols - 1, x + 1)] - G[y * cols + Math.max(0, x - 1)];
+        const gy = G[Math.min(rows - 1, y + 1) * cols + x] - G[Math.max(0, y - 1) * cols + x];
+        SH[i] = Math.max(0.62, Math.min(1.3, 1 + (gx * 0.8 + gy * 1.0) * 0.16));
+      }
+    }
   }
 
-  function visualHeight(c, h) { return c.rock ? ROCK_VISUAL : h; }
+  // Couleur du sol selon sa hauteur par rapport à la marée haute :
+  // sable sous la ligne (la mer peut y aller), dune herbue au-dessus (à l'abri).
+  function groundRGB(rel, grass, out) {
+    if (rel < 0) {
+      const k = Math.max(0, Math.min(1, (rel + 3) / 3)); // de « très bas » à « juste sous la ligne »
+      out[0] = 196 + 40 * k; out[1] = 160 + 48 * k; out[2] = 104 + 50 * k;
+    } else {
+      const k = Math.min(1, rel / 2);
+      out[0] = 226 - 22 * k; out[1] = 224 - 6 * k; out[2] = 170 - 12 * k;
+      if (grass) { out[0] = 150; out[1] = 172; out[2] = 96; }
+    }
+  }
 
-  // ---------- dessin ----------
-  function draw(time) {
-    const s = state();
-    // la marée affichée rejoint doucement la vraie
-    const target = s.tide;
-    if (reduceMotion) shownTide = target;
-    else shownTide += (target - shownTide) * 0.08;
-    if (Math.abs(target - shownTide) < 0.002) shownTide = target;
+  function hash(x, y) {
+    const v = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+    return v - Math.floor(v);
+  }
 
-    const st = R.status(level, s);
-    const wet = st.wet;
+  function renderBeach(time) {
+    computeFields();
+    const { cols, rows } = lv;
+    const W = cols * K, H = rows * K;
+    const d = img.data;
+    const rgb = [0, 0, 0];
     const t = reduceMotion ? 0 : time / 1000;
+    const lap = phase === 'build' ? 0.5 + 0.5 * Math.sin(t * 1.6) : 0.5;
+    const level = Math.max(seaLevel, 0.05);
+    for (let py = 0; py < H; py++) {
+      const fy = (py + 0.5) / K - 0.5;
+      const y0 = Math.max(0, Math.min(rows - 1, Math.floor(fy)));
+      const y1 = Math.min(rows - 1, y0 + 1);
+      const ty = Math.max(0, Math.min(1, fy - y0));
+      for (let px = 0; px < W; px++) {
+        const fx = (px + 0.5) / K - 0.5;
+        const x0 = Math.max(0, Math.min(cols - 1, Math.floor(fx)));
+        const x1 = Math.min(cols - 1, x0 + 1);
+        const tx = Math.max(0, Math.min(1, fx - x0));
+        const a = y0 * cols + x0, b = y0 * cols + x1, c = y1 * cols + x0, e = y1 * cols + x1;
+        const w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty), w01 = (1 - tx) * ty, w11 = tx * ty;
+        const g = G[a] * w00 + G[b] * w10 + G[c] * w01 + G[e] * w11;
+        const sh = SH[a] * w00 + SH[b] * w10 + SH[c] * w01 + SH[e] * w11;
+        const wv = wetVis[a] * w00 + wetVis[b] * w10 + wetVis[c] * w01 + wetVis[e] * w11;
+        const wl = wallVis[a] * w00 + wallVis[b] * w10 + wallVis[c] * w01 + wallVis[e] * w11;
+        const ci = Math.round(fy) * cols + Math.round(fx);
+        let r, gr, bl;
+        if (lv.rock[Math.max(0, Math.min(cols * rows - 1, ci))] && wl < 0.5) {
+          const nz = ((px * 7 + py * 13) % 5) * 3;
+          r = 126 + nz; gr = 134 + nz; bl = 132 + nz;
+        } else {
+          const rel = g - wl * Sim.WALL_H - lv.tideMax;
+          const n = hash(px, py);
+          groundRGB(rel, rel > 0.25 && n < 0.07 && wl < 0.3, rgb);
+          r = rgb[0]; gr = rgb[1]; bl = rgb[2];
+          if (wl > 0.01) { // sable tassé du mur, plus chaud et plus clair
+            r += (244 - r) * wl * 0.75; gr += (206 - gr) * wl * 0.75; bl += (136 - bl) * wl * 0.75;
+          }
+          const grain = (n - 0.5) * 10;
+          r += grain; gr += grain; bl += grain;
+        }
+        r *= sh; gr *= sh; bl *= sh;
+        if (wv > 0.02) {
+          const depth = Math.max(0, level - g);
+          const k = Math.min(1, depth / 2.6);
+          const wr = 88 + (14 - 88) * k, wg = 196 + (98 - 196) * k, wb = 192 + (118 - 192) * k;
+          const ripple = Math.sin(px * 0.21 + t * 1.8 + Math.sin(py * 0.13 + t * 0.9) * 2) * 8;
+          const alpha = Math.min(0.93, 0.5 + depth * 0.22) * Math.min(1, wv * 1.4);
+          r += (wr + ripple - r) * alpha; gr += (wg + ripple - gr) * alpha; bl += (wb + ripple - bl) * alpha;
+          const edge = 1 - Math.abs(wv - 0.5) * 2;
+          if (edge > 0) {
+            const foam = edge * (0.55 + 0.35 * lap);
+            r += (250 - r) * foam; gr += (252 - gr) * foam; bl += (248 - bl) * foam;
+          }
+        }
+        const o = (py * W + px) * 4;
+        d[o] = r; d[o + 1] = gr; d[o + 2] = bl; d[o + 3] = 255;
+      }
+    }
+    offCtx.putImageData(img, 0, 0);
+  }
+
+  // ---------- dessin d'une image ----------
+  let lastTime = 0;
+  function frame(time) {
+    const dt = Math.min(0.05, (time - (lastTime || time)) / 1000);
+    lastTime = time;
+    updateTide(dt);
+    renderBeach(time);
 
     ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
-    drawSea(t);
-
-    const order = level.cells.map((c, i) => i).sort((a, b) => {
-      const ca = level.cells[a], cb = level.cells[b];
-      return ca.r - cb.r || (ca.q + ca.r / 2) - (cb.q + cb.r / 2);
-    });
-
-    hitShapes = [];
-    for (const i of order) drawCell(i, s, wet, t);
-
-    drawGrains(time);
-    drawDragLine();
-    requestAnimationFrame(draw);
-  }
-
-  function drawSea(t) {
-    const g = ctx.createLinearGradient(0, 0, 0, view.h);
-    g.addColorStop(0, COLORS.seaDeep);
-    g.addColorStop(1, COLORS.sea);
-    ctx.fillStyle = g;
+    ctx.fillStyle = '#0b5466';
     ctx.fillRect(0, 0, view.w, view.h);
-    // petites vagues
-    ctx.strokeStyle = 'rgba(238, 248, 244, 0.10)';
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(off, view.ox, view.oy, lv.cols * view.cs, lv.rows * view.cs);
+
+    if (phase === 'build') drawContour(time);
+    drawGuide(time);
+    lv.castles.forEach((c, k) => drawCastle(c, k, time));
+    if (lostPath) drawPath(time);
+    drawParticles(time);
+    if (finger && phase === 'build') {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(finger.x, finger.y, view.cs * Sim.BRUSH_R * 1.6, 0, Math.PI * 2); ctx.stroke();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function drawContour(time) {
+    const pulse = reduceMotion ? 0.8 : 0.65 + 0.25 * Math.sin(time / 500);
+    ctx.fillStyle = `rgba(255, 255, 255, ${pulse + 0.1})`;
+    const r = Math.max(1.2, view.cs * 0.2);
+    for (let k = 0; k < contour.length; k += 2) {
+      const p = toScreen(contour[k][0], contour[k][1]);
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Tutoriel du premier niveau : un doigt fantôme montre le geste tant que rien n'est dessiné.
+  function drawGuide(time) {
+    if (!lv.guide || strokes.length || current || phase !== 'build') return;
+    const [a, b] = lv.guide.map(([x, y]) => toScreen(x, y));
+    ctx.setLineDash([view.cs * 1.2, view.cs * 0.9]);
+    ctx.strokeStyle = 'rgba(255, 244, 207, 0.9)';
+    ctx.lineWidth = view.cs * 1.2;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.setLineDash([]);
+    const k = reduceMotion ? 0.5 : ((time / 1600) % 1.3) / 1.3 * 1.3;
+    const kk = Math.min(1, k);
+    const x = a.x + (b.x - a.x) * kk, y = a.y + (b.y - a.y) * kk;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.beginPath(); ctx.arc(x, y + view.cs * 0.2, view.cs * 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(16, 50, 58, 0.5)';
     ctx.lineWidth = 2;
-    const gap = Math.max(26, view.s * 0.9);
-    for (let y = gap / 2; y < view.h; y += gap) {
-      ctx.beginPath();
-      for (let x = -20; x <= view.w + 20; x += 8) {
-        const yy = y + Math.sin(x / 38 + t * 1.3 + y) * 3;
-        x === -20 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy);
-      }
-      ctx.stroke();
-    }
-  }
-
-  let hitShapes = []; // { i, poly } dans l'ordre de dessin
-
-  function drawCell(i, s, wet, t) {
-    const c = level.cells[i];
-    const h = s.h[i];
-    const { x, y } = center(c);
-    const base = shownTide;
-    const vh = visualHeight(c, h);
-    const underWater = wet[i] && shownTide >= h - 0.001;
-    const isTarget = targets.includes(i);
-
-    if (underWater) {
-      // sable sous l'eau : on devine la case, plus sombre quand elle est profonde
-      const top = hexPoints(x, y, base);
-      const depth = Math.max(0, shownTide - h);
-      pathPoly(hexPoints(x, y, base, 0.94));
-      ctx.fillStyle = depth < 0.5 ? 'rgba(120, 205, 200, 0.55)' : depth < 1.5 ? 'rgba(70, 170, 175, 0.45)' : 'rgba(40, 130, 145, 0.35)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(238, 248, 244, ' + (0.25 + 0.1 * Math.sin(t * 2 + i)) + ')';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      label(x, top, String(h), 'rgba(238, 248, 244, 0.85)', 0.34);
-      hitShapes.push({ i, poly: top });
-      return;
-    }
-
-    const pitDry = !c.rock && h <= shownTide; // cuvette au sec, sous le niveau de la mer
-    const bottom = pitDry ? h : base;
-    const topLift = pitDry ? h : Math.max(vh, base);
-    const top = hexPoints(x, y, topLift);
-    const bot = hexPoints(x, y, bottom);
-
-    // côtés visibles : bas-gauche, bas, bas-droit
-    if (topLift > bottom + 0.001) {
-      const sides = [[4, 3, c.rock ? COLORS.rockSideDark : COLORS.sandSideDark], [3, 2, c.rock ? COLORS.rockSide : COLORS.sandSide]];
-      sides.push([5, 4, c.rock ? COLORS.rockSideDark : COLORS.sandSideDark]);
-      sides.push([2, 1, c.rock ? COLORS.rockSide : COLORS.sandSide]);
-      for (const [a, b, col] of sides) {
-        pathPoly([top[a], top[b], bot[b], bot[a]]);
-        ctx.fillStyle = col;
-        ctx.fill();
-      }
-      // strates de sable
-      if (!c.rock) {
-        ctx.strokeStyle = 'rgba(90, 60, 25, 0.18)';
-        ctx.lineWidth = 1;
-        for (let k = Math.ceil(bottom + 0.01); k < topLift - 0.01; k++) {
-          const p = hexPoints(x, y, k);
-          ctx.beginPath();
-          ctx.moveTo(p[5][0], p[5][1]); ctx.lineTo(p[4][0], p[4][1]); ctx.lineTo(p[3][0], p[3][1]);
-          ctx.lineTo(p[2][0], p[2][1]); ctx.lineTo(p[1][0], p[1][1]);
-          ctx.stroke();
-        }
-      }
-      // écume au pied de la case
-      if (!pitDry) {
-        ctx.strokeStyle = 'rgba(238, 248, 244, ' + (0.55 + 0.25 * Math.sin(t * 2.2 + i * 1.7)) + ')';
-        ctx.lineWidth = Math.max(2, view.s * 0.06);
-        ctx.beginPath();
-        ctx.moveTo(bot[5][0], bot[5][1]); ctx.lineTo(bot[4][0], bot[4][1]); ctx.lineTo(bot[3][0], bot[3][1]);
-        ctx.lineTo(bot[2][0], bot[2][1]); ctx.lineTo(bot[1][0], bot[1][1]);
-        ctx.stroke();
-      }
-    }
-
-    // dessus
-    pathPoly(top);
-    if (c.rock) ctx.fillStyle = COLORS.rockTop;
-    else if (pitDry) ctx.fillStyle = COLORS.pit;
-    else if (h <= s.tide + 1) ctx.fillStyle = COLORS.sandDamp;      // sera noyée à la prochaine marée si l'eau l'atteint
-    else if (h >= s.tide + 3) ctx.fillStyle = COLORS.sandTopHigh;
-    else ctx.fillStyle = COLORS.sandTop;
-    ctx.fill();
-    ctx.strokeStyle = c.rock ? 'rgba(40, 50, 50, 0.35)' : 'rgba(120, 85, 40, 0.35)';
-    ctx.lineWidth = 1;
     ctx.stroke();
+  }
 
-    if (i === selected) {
-      pathPoly(hexPoints(x, y, topLift, 0.9));
-      ctx.strokeStyle = COLORS.select;
-      ctx.lineWidth = Math.max(3, view.s * 0.09);
-      ctx.stroke();
-    } else if (isTarget) {
-      pathPoly(hexPoints(x, y, topLift, 0.82));
-      ctx.setLineDash([view.s * 0.16, view.s * 0.12]);
-      ctx.strokeStyle = COLORS.target;
-      ctx.lineWidth = Math.max(2, view.s * 0.06);
-      ctx.stroke();
-      ctx.setLineDash([]);
+  function drawCastle(c, k, time) {
+    const p = toScreen(c.x, c.y);
+    const s = view.cs * 7.6;
+    const t = reduceMotion ? 0 : time / 1000;
+    const drowned = phase === 'lost' && k === lostCastle;
+    const sink = drowned ? Math.min(1, (performance.now() - lostAt) / 900) : 0;
+    const jump = phase === 'won' && !reduceMotion ? Math.abs(Math.sin((performance.now() - wonAt) / 180)) * Math.max(0, 1 - (performance.now() - wonAt) / 1200) * s * 0.08 : 0;
+    ctx.save();
+    ctx.translate(p.x, p.y + s * 0.18 * sink - jump);
+    ctx.globalAlpha = 1 - sink * 0.45;
+    // ombre
+    ctx.fillStyle = 'rgba(60, 40, 15, 0.25)';
+    ctx.beginPath(); ctx.ellipse(s * 0.05, s * 0.3, s * 0.5, s * 0.14, 0, 0, Math.PI * 2); ctx.fill();
+    const body = '#ecc98a', dark = '#b98a4c', light = '#f7e1b0';
+    ctx.lineWidth = Math.max(1, s * 0.025);
+    ctx.strokeStyle = dark;
+    const block = (x, y, w, h, fill) => { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); };
+    const crenel = (x, y, w, n) => {
+      const cw = w / (n * 2 - 1);
+      for (let j = 0; j < n; j++) block(x + j * cw * 2, y - cw, cw, cw, body);
+    };
+    // tours
+    block(-s * 0.46, -s * 0.18, s * 0.22, s * 0.46, body);
+    crenel(-s * 0.46, -s * 0.18, s * 0.22, 2);
+    block(s * 0.24, -s * 0.18, s * 0.22, s * 0.46, body);
+    crenel(s * 0.24, -s * 0.18, s * 0.22, 2);
+    // mur
+    block(-s * 0.26, -s * 0.02, s * 0.52, s * 0.3, body);
+    crenel(-s * 0.26, -s * 0.02, s * 0.52, 4);
+    // donjon
+    block(-s * 0.14, -s * 0.32, s * 0.28, s * 0.6, light);
+    crenel(-s * 0.14, -s * 0.32, s * 0.28, 2);
+    ctx.fillStyle = '#7a5530';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.06, s * 0.28); ctx.lineTo(-s * 0.06, s * 0.16);
+    ctx.arc(0, s * 0.16, s * 0.06, Math.PI, 0); ctx.lineTo(s * 0.06, s * 0.28); ctx.closePath(); ctx.fill();
+    // drapeau
+    const poleTop = -s * 0.78;
+    ctx.strokeStyle = '#5b4630';
+    ctx.lineWidth = Math.max(1.5, s * 0.03);
+    ctx.beginPath(); ctx.moveTo(0, -s * 0.4); ctx.lineTo(0, poleTop); ctx.stroke();
+    const wave = drowned ? 0 : Math.sin(t * 5) * s * 0.03;
+    const droop = drowned ? s * 0.18 : 0;
+    ctx.fillStyle = '#e2463a';
+    ctx.beginPath();
+    ctx.moveTo(0, poleTop);
+    ctx.quadraticCurveTo(s * 0.16, poleTop + s * 0.02 + wave + droop * 0.5, s * 0.32 - droop, poleTop + s * 0.09 + wave + droop);
+    ctx.quadraticCurveTo(s * 0.16, poleTop + s * 0.16 - wave + droop * 0.5, 0, poleTop + s * 0.2);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // Défaite : on montre le chemin exact pris par l'eau, de la mer jusqu'au château.
+  function drawPath(time) {
+    const pts = [];
+    for (let k = 0; k < lostPath.length; k += 2) {
+      const i = lostPath[k];
+      pts.push(toScreen((i % lv.cols) + 0.5, Math.floor(i / lv.cols) + 0.5));
     }
-
-    if (c.flag) drawFlag(x, top, t);
-    if (!c.rock) label(c.flag ? x - view.s * 0.36 : x, top, String(h), COLORS.ink, c.flag ? 0.3 : 0.4, c.flag ? -0.22 : 0);
-
-    hitShapes.push({ i, poly: topLift > bottom ? [top[5], top[0], top[1], bot[2], bot[3], bot[4]] : top });
-  }
-
-  function label(x, top, text, color, size, dy = 0) {
-    const cy = (top[0][1] + top[3][1]) / 2 + dy * view.s * TILT;
-    ctx.fillStyle = color;
-    ctx.font = `700 ${Math.round(view.s * size)}px 'Atkinson Hyperlegible', system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, x, cy + 1);
-  }
-
-  function drawFlag(x, top, t) {
-    const cy = (top[0][1] + top[3][1]) / 2;
-    const s = view.s;
-    const px = x + s * 0.12, py = cy + s * 0.08;
-    const poleTop = py - s * 0.95;
-    ctx.strokeStyle = COLORS.pole;
-    ctx.lineWidth = Math.max(2, s * 0.06);
-    ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, poleTop); ctx.stroke();
-    const wave = Math.sin(t * 4) * s * 0.05;
-    ctx.fillStyle = COLORS.flag;
-    ctx.beginPath();
-    ctx.moveTo(px, poleTop);
-    ctx.quadraticCurveTo(px + s * 0.28, poleTop + s * 0.05 + wave, px + s * 0.55, poleTop + s * 0.17 + wave);
-    ctx.quadraticCurveTo(px + s * 0.28, poleTop + s * 0.3 - wave, px, poleTop + s * 0.38);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = 'rgba(16, 50, 58, 0.18)';
-    ctx.beginPath(); ctx.ellipse(px, py, s * 0.12, s * 0.05, 0, 0, Math.PI * 2); ctx.fill();
-  }
-
-  function topCenter(i) {
-    const c = level.cells[i];
-    const s = state();
-    const { x, y } = center(c);
-    const wet = R.computeWet(level, s.h, s.tide)[i];
-    const lift = wet ? shownTide : (s.h[i] <= shownTide ? s.h[i] : Math.max(visualHeight(c, s.h[i]), shownTide));
-    return { x, y: y - lift * LIFT * view.s };
-  }
-
-  function drawDragLine() {
-    if (selected < 0 || !drag) return;
-    const a = topCenter(selected);
-    ctx.strokeStyle = 'rgba(255, 244, 207, 0.85)';
-    ctx.lineWidth = Math.max(3, view.s * 0.08);
-    ctx.setLineDash([2, view.s * 0.18]);
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    const mx = (a.x + drag.x) / 2, my = Math.min(a.y, drag.y) - view.s * 0.8;
-    ctx.quadraticCurveTo(mx, my, drag.x, drag.y);
+    if (pts.length < 2) return;
+    const shown = phase === 'lost' && !reduceMotion ? Math.min(pts.length, Math.floor((performance.now() - lostAt) / 12)) : pts.length;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(16, 50, 58, 0.45)';
+    ctx.lineWidth = view.cs * 1.4;
+    ctx.beginPath(); pts.slice(0, shown).forEach((p, k) => (k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.stroke();
+    ctx.setLineDash([view.cs * 0.9, view.cs * 1.1]);
+    ctx.lineDashOffset = reduceMotion ? 0 : -time / 40;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = view.cs * 0.7;
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = COLORS.sandTop;
-    ctx.beginPath(); ctx.arc(drag.x, drag.y, view.s * 0.16, 0, Math.PI * 2); ctx.fill();
   }
 
-  function launchGrain(from, to) {
-    const a = topCenter(from), b = topCenter(to);
-    grains.push({ a, b, start: performance.now(), dur: reduceMotion ? 1 : 320 });
+  // ---------- grains de sable ----------
+  function spawnGrains(cx, cy, count) {
+    if (reduceMotion) return;
+    const p = toScreen(cx, cy);
+    for (let k = 0; k < count; k++) {
+      const a = Math.random() * Math.PI * 2, v = 30 + Math.random() * 70;
+      particles.push({ x: p.x, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 40, born: performance.now(), life: 350 + Math.random() * 250 });
+    }
   }
-
-  function drawGrains(now) {
-    grains = grains.filter((g) => now - g.start < g.dur);
-    for (const g of grains) {
-      const k = Math.min(1, (now - g.start) / g.dur);
-      const x = g.a.x + (g.b.x - g.a.x) * k;
-      const arc = Math.sin(Math.PI * k) * view.s * 0.9;
-      const y = g.a.y + (g.b.y - g.a.y) * k - arc;
-      ctx.fillStyle = COLORS.sandTop;
-      ctx.strokeStyle = COLORS.sandSideDark;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(x, y, view.s * 0.17, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  function drawParticles(now) {
+    particles = particles.filter((q) => now - q.born < q.life);
+    for (const q of particles) {
+      const s = (now - q.born) / 1000;
+      const k = 1 - (now - q.born) / q.life;
+      ctx.fillStyle = `rgba(222, 184, 120, ${k})`;
+      ctx.fillRect(q.x + q.vx * s, q.y + q.vy * s + 120 * s * s, 2.5, 2.5);
     }
   }
 
   // ---------- gestes ----------
-  function pointInPoly(px, py, poly) {
-    let inside = false;
-    for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
-      const [xa, ya] = poly[a], [xb, yb] = poly[b];
-      if ((ya > py) !== (yb > py) && px < ((xb - xa) * (py - ya)) / (yb - ya) + xa) inside = !inside;
-    }
-    return inside;
-  }
-
-  function cellAt(px, py) {
-    for (let k = hitShapes.length - 1; k >= 0; k--) {
-      if (pointInPoly(px, py, hitShapes[k].poly)) return hitShapes[k].i;
-    }
-    return -1;
-  }
-
   function localPoint(e) {
     const r = canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
-  function select(i) {
-    const s = state();
-    const wet = R.computeWet(level, s.h, s.tide);
-    if (i >= 0 && R.canTake(level, s, wet, i)) {
-      selected = i;
-      targets = R.targetsFrom(level, s, wet, i);
-      return true;
+  let lastBuzz = 0;
+  function paintTo(cell) {
+    if (left <= 0) {
+      const b = $('bucket');
+      b.classList.remove('empty'); void b.offsetWidth; b.classList.add('empty');
+      setHint('Plus de sable ! Annule un trait pour en récupérer.', true);
+      return;
     }
-    selected = -1; targets = [];
-    return false;
+    const built = Sim.paint(lv, wall, water, lastPoint || cell, cell, left);
+    lastPoint = cell;
+    if (!built.length) return;
+    current.push(...built);
+    left -= built.length;
+    spawnGrains(cell[0], cell[1], Math.min(6, built.length + 1));
+    const now = performance.now();
+    if (now - lastBuzz > 70) { buzz(4); lastBuzz = now; }
+    refreshHud();
   }
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (R.status(level, state()).over) return;
+    if (phase !== 'build' || !$('menu').hidden) return;
+    canvas.setPointerCapture(e.pointerId);
     const p = localPoint(e);
-    const i = cellAt(p.x, p.y);
-    pointerStart = { ...p, i };
-    if (selected >= 0 && targets.includes(i)) { act([selected, i]); pointerStart = null; return; }
-    if (i === selected && i >= 0) { drag = p; canvas.setPointerCapture(e.pointerId); return; }
-    if (select(i)) { drag = p; canvas.setPointerCapture(e.pointerId); }
-    else flashHint(i);
+    finger = p;
+    current = [];
+    lastPoint = null;
+    const cell = toCell(p);
+    const ci = Math.floor(cell[1]) * lv.cols + Math.floor(cell[0]);
+    if (lv.castleCell[ci]) setHint('Trace ton mur autour du château, pas dessus.', true);
+    else if (water.wet[ci]) setHint('Impossible de construire dans l’eau : trace sur le sable.', true);
+    paintTo(cell);
   });
-
   canvas.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    drag = localPoint(e);
-  });
-
-  canvas.addEventListener('pointerup', (e) => {
-    if (!drag) return;
+    if (!current) return;
     const p = localPoint(e);
-    const i = cellAt(p.x, p.y);
-    drag = null;
-    const moved = pointerStart && Math.hypot(p.x - pointerStart.x, p.y - pointerStart.y) > 10;
-    if (selected >= 0 && i !== selected && targets.includes(i)) act([selected, i]);
-    else if (moved && i !== selected) { selected = -1; targets = []; }
-    // sinon : simple toucher, la case reste choisie pour un deuxième toucher sur la destination
+    finger = p;
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ev of events) paintTo(toCell(localPoint(ev)));
   });
-
-  canvas.addEventListener('pointercancel', () => { drag = null; });
-
-  let hintTimer = null;
-  function flashHint(i) {
-    if (i < 0) return;
-    const c = level.cells[i];
-    const s = state();
-    const wet = R.computeWet(level, s.h, s.tide);
-    let msg = '';
-    if (c.rock) msg = 'Un rocher : impossible d’y creuser, mais on peut marcher dessus.';
-    else if (c.flag) msg = 'On ne creuse pas sous le drapeau. Apporte-lui du sable.';
-    else if (wet[i]) msg = 'Cette case est sous l’eau. Choisis d’abord du sable au sec, puis verse-le ici.';
-    else if (s.h[i] === 0) msg = 'Il n’y a plus de sable ici.';
-    if (!msg) return;
-    $('hint').textContent = msg;
-    clearTimeout(hintTimer);
-    hintTimer = setTimeout(() => { $('hint').textContent = level.hint; }, 2600);
+  function endStroke() {
+    if (current && current.length) strokes.push(current);
+    current = null; finger = null; lastPoint = null;
+    refreshHud();
   }
+  canvas.addEventListener('pointerup', endStroke);
+  canvas.addEventListener('pointercancel', endStroke);
 
-  // ---------- boutons ----------
-  $('btn-undo').addEventListener('click', undo);
-  $('btn-wait').addEventListener('click', () => act(null));
-  $('btn-restart').addEventListener('click', restart);
+  $('btn-undo').addEventListener('click', undoStroke);
+  $('btn-clear').addEventListener('click', () => { clearAll(); setHint(lv.hint); });
+  $('btn-tide').addEventListener('click', launchTide);
   $('btn-menu').addEventListener('click', openMenu);
   $('btn-close-menu').addEventListener('click', () => { $('menu').hidden = true; });
   window.addEventListener('resize', layout);
   if (window.ResizeObserver) new ResizeObserver(layout).observe($('board'));
 
-  // ---------- démarrage (avec reprise si la page est mise à jour pendant une partie) ----------
-  function start(data) {
-    const snap = data && data.levelIdx !== undefined && LEVELS[data.levelIdx] ? data : null;
-    startLevel(snap ? snap.levelIdx : firstUnfinished(), snap);
-    requestAnimationFrame(draw);
-  }
-  function firstUnfinished() {
-    const i = LEVELS.findIndex((d) => !progress[d.id]);
-    return i < 0 ? 0 : i;
-  }
   // Accès pour les tests automatisés (tools/smoke.js).
   window.MareeHaute = {
-    get level() { return level; },
-    get state() { return state(); },
-    cellPoint: (i) => topCenter(i),
+    get level() { return lv; },
+    get phase() { return phase; },
+    get left() { return left; },
+    cellToClient(cx, cy) {
+      const r = canvas.getBoundingClientRect();
+      const p = toScreen(cx, cy);
+      return { x: r.left + p.x, y: r.top + p.y };
+    },
     startLevel: (i) => startLevel(i),
   };
 
+  // ---------- démarrage (avec reprise si la page est mise à jour pendant une partie) ----------
+  function start(data) {
+    const ok = data && data.levelIdx !== undefined && LEVELS[data.levelIdx];
+    if (ok) startLevel(data.levelIdx, data.strokes);
+    else {
+      const i = LEVELS.findIndex((d) => !progress[d.id]);
+      startLevel(i < 0 ? 0 : i);
+    }
+    requestAnimationFrame(frame);
+  }
   const hot = window.claude && window.claude.hot;
-  if (hot && hot.snapshot) hot.snapshot(() => ({ levelIdx, history, usedUndo }));
+  if (hot && hot.snapshot) hot.snapshot(() => ({ levelIdx, strokes }));
   if (hot && hot.ready) hot.ready(start); else start((hot && hot.data) || {});
 })();

@@ -1,45 +1,55 @@
 # Marée Haute
 
-Prototype de jeu mobile de réflexion : une île de sable en cases hexagonales, une marée qui monte, et un drapeau à garder au sec.
+Prototype de jeu mobile : **trace des murs de sable pour protéger le château, puis lance la marée.**
 
 Ouvre `index.html` dans un navigateur (sur téléphone ou en vue mobile). Aucune installation n'est nécessaire.
 
-## Règles (v1)
+## Comment on joue
 
-1. Chaque case a une hauteur de sable. La mer part du niveau 0.
-2. Une action consiste à déplacer **1 sable** d'une case à une autre (en glissant le doigt, ou en touchant la source puis la destination). **Attendre** compte aussi comme une action.
-3. Le sable se porte **à pied** : la destination doit être reliée à la source par un chemin de cases au sec. Les rochers servent de passage.
-4. La marée monte d'un niveau toutes les *X* actions. *X* dépend du niveau et s'affiche en haut de l'écran.
-5. L'eau entre **par la côte** et se propage. Une case est noyée si sa hauteur est ≤ la marée **et** si l'eau peut l'atteindre. Une cuvette entourée de sable plus haut reste au sec : c'est le principe des digues.
-6. On peut **verser du sable dans l'eau** (remblai) sur une case noyée qui touche la terre ferme.
-7. Le niveau est perdu dès qu'un drapeau est noyé. Il est gagné quand la marée haute arrive et que tous les drapeaux sont au sec.
+1. Glisse le doigt sur la plage pour construire un mur de sable. Chaque trait vide un peu le seau.
+2. Les **pointillés** montrent jusqu'où la mer va monter. Le sable doré est inondable, les dunes vertes restent à l'abri.
+3. Appuie sur **Marée !** et regarde l'eau monter. Elle passe partout où il n'y a ni mur, ni dune, ni rocher.
+4. Si l'eau atteint le château, le jeu **trace le chemin qu'elle a pris**. « Réparer » garde tes murs : il suffit de boucher la brèche.
+5. Moins tu utilises de sable, plus tu gagnes d'étoiles (repères ★★ et ★★★ sur la jauge).
 
-**Étoiles :** ★ drapeau(x) sauvé(s), ★ sans annuler, ★ nombre maximal de cases au sec à la marée haute.
+## Niveaux
+
+| # | Niveau | Ce qu'on apprend |
+|---|---|---|
+| 1 | La crique | Le geste : un trait en travers d'un passage (tutoriel animé) |
+| 2 | Deux chenaux | L'eau prend tous les passages |
+| 3 | Plage ouverte | S'appuyer sur la dune |
+| 4 | Près ou loin | Entourer le château coûte moins cher que fermer la baie |
+| 5 | Les rochers | Relier les rochers |
+| 6 | Le ruisseau | L'eau peut arriver par derrière : lire les pointillés |
+| 7 | Les jumeaux | Deux châteaux, un seul seau |
+| 8 | Grande marée | La mer monte très haut |
 
 ## Fichiers
 
 | Fichier | Rôle |
 |---|---|
 | `index.html` | Page du jeu (styles et structure) |
-| `src/rules.js` | Règles pures, sans affichage, partagées avec les outils |
-| `src/levels.js` | Les 10 niveaux et leur meilleur score |
-| `src/app.js` | Rendu canvas, gestes, marée, écrans |
-| `tools/solve.js` | Solveur : vérifie que chaque niveau est faisable et calcule le meilleur score |
-| `tools/smoke.js` | Test dans Chromium : joue le niveau 1 au doigt, vérifie la règle du chemin au niveau 2 |
+| `src/sim.js` | Simulation pure : terrain, murs, montée de l'eau |
+| `src/levels.js` | Cartes des niveaux |
+| `src/app.js` | Rendu canvas, dessin au doigt, marée animée, écrans |
+| `tools/check.js` | Vérifie chaque niveau (faisable, pas trivial) et calcule la coupe minimale pour régler le seau et les étoiles |
+| `tools/smoke.js` | Test dans Chromium : victoire au niveau 1, défaite expliquée puis réparation au niveau 2 |
+| `prototypes/v1-hexagones/` | Premier prototype (tour par tour sur hexagones), conservé pour mémoire |
 
 ```sh
-node tools/solve.js            # tous les niveaux
-node tools/solve.js cuvette    # un niveau, avec une solution
+node tools/check.js
 NODE_PATH=$(npm root -g) node tools/smoke.js
 ```
 
 ## Écrire un niveau
 
-Une carte se décrit avec une chaîne par rangée. Les jetons sont séparés par des espaces et les rangées impaires sont décalées d'un demi-hexagone vers la droite.
+Une carte fait 15 × 22 caractères, et chaque caractère couvre 4 × 4 cellules.
 
-- `.` : mer
+- `~` : mer profonde
+- `,` : mer peu profonde
+- `.` : sable mouillé
 - `1`…`9` : hauteur du sable
-- `F2` : drapeau sur une case de hauteur 2
 - `R` : rocher
 
-Lance ensuite `node tools/solve.js <id>` et reporte le score `meilleur` dans le champ `best` du niveau.
+`tideMax` fixe la hauteur atteinte par la mer, `bucket` le sable disponible et `par` l'objectif pour 3 étoiles. `node tools/check.js` signale un niveau impossible, un niveau trop facile ou un réglage incohérent.
